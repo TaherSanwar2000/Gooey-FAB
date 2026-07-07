@@ -1,8 +1,13 @@
 /**
- * GooeyFab — a Skia-powered liquid/gooey floating action button.
- * The blur slider proves the effect is a real blur+alpha-threshold
- * technique, not a canned animation: drag it and watch the blobs
- * melt from crisp circles into a liquid gooey mass in real time.
+ * GooeyFab — a Skia-powered liquid/gooey floating action button,
+ * now server-driven end to end:
+ *
+ *  - The satellite actions come from a Node backend (GET /fab-config with
+ *    ETag revalidation), and config changes are pushed live over WebSocket —
+ *    toggle an action on the server and watch the FAB morph on device.
+ *  - Taps are delivered through an offline-first queue: optimistic toast,
+ *    persisted across restarts, exponential-backoff retries, and an
+ *    Idempotency-Key per entry so retries never double-fire server-side.
  *
  * Built with react-native-gesture-handler, react-native-reanimated
  * and @shopify/react-native-skia.
@@ -10,7 +15,7 @@
  * @format
  */
 
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { StatusBar, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import {
@@ -21,9 +26,17 @@ import { useSharedValue } from 'react-native-reanimated';
 import GooeyFab, { FabAction } from './src/components/GooeyFab';
 import GooSlider from './src/components/GooSlider';
 import Toast from './src/components/Toast';
+import { useFabConfig } from './src/hooks/useFabConfig';
+import { enqueue, initQueue, subscribe } from './src/lib/actionQueue';
 
 const MIN_BLUR = 0;
 const MAX_BLUR = 18;
+
+const STATUS_COLORS = {
+  live: '#22c55e',
+  connecting: '#f59e0b',
+  offline: '#ef4444',
+} as const;
 
 function App() {
   return (
@@ -41,41 +54,46 @@ function AppContent() {
   const { width, height } = useWindowDimensions();
   const blur = useSharedValue(12);
   const [toast, setToast] = useState({ text: '', id: 0 });
+  const { config, status } = useFabConfig();
 
   const showToast = useCallback((text: string) => {
     setToast({ text, id: Date.now() });
   }, []);
 
-  const fabActions: FabAction[] = [
-    {
-      key: 'camera',
-      icon: '📷',
-      label: 'Camera',
-      color: '#0ea5e9',
-      onPress: () => showToast('📷 Camera'),
-    },
-    {
-      key: 'music',
-      icon: '🎵',
-      label: 'Music',
-      color: '#a855f7',
-      onPress: () => showToast('🎵 Music'),
-    },
-    {
-      key: 'chat',
-      icon: '💬',
-      label: 'Chat',
-      color: '#22c55e',
-      onPress: () => showToast('💬 Chat'),
-    },
-    {
-      key: 'share',
-      icon: '📤',
-      label: 'Share',
-      color: '#f59e0b',
-      onPress: () => showToast('📤 Share'),
-    },
-  ];
+  useEffect(() => {
+    initQueue();
+    return subscribe(({ action, status: deliveryStatus }) => {
+      switch (deliveryStatus) {
+        case 'confirmed':
+          showToast(`✓ ${action.label} synced`);
+          break;
+        case 'retrying':
+          showToast(`⏳ ${action.label} queued — will retry`);
+          break;
+        case 'rejected':
+          showToast(`✕ ${action.label} rejected by server`);
+          break;
+      }
+    });
+  }, [showToast]);
+
+  const fabActions: FabAction[] = useMemo(
+    () =>
+      config.actions
+        .filter(action => action.enabled)
+        .slice(0, 4)
+        .map(action => ({
+          key: action.key,
+          icon: action.icon,
+          label: action.label,
+          color: action.color,
+          onPress: () => {
+            showToast(`${action.icon} ${action.label}`);
+            enqueue(action.key, action.label);
+          },
+        })),
+    [config, showToast],
+  );
 
   return (
     <View style={styles.container}>
@@ -95,6 +113,14 @@ function AppContent() {
       <Toast text={toast.text} id={toast.id} />
 
       <View style={[styles.footer, { paddingBottom: insets.bottom + 32 }]}>
+        <View style={styles.statusRow}>
+          <View
+            style={[styles.statusDot, { backgroundColor: STATUS_COLORS[status] }]}
+          />
+          <Text style={styles.statusText}>
+            config v{config.version} · {status}
+          </Text>
+        </View>
         <GooSlider value={blur} min={MIN_BLUR} max={MAX_BLUR} />
       </View>
     </View>
@@ -128,6 +154,24 @@ const styles = StyleSheet.create({
   },
   footer: {
     alignItems: 'center',
+  },
+  statusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 14,
+  },
+  statusDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    marginRight: 6,
+  },
+  statusText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#8a8a8e',
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
   },
 });
 
