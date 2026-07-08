@@ -38,8 +38,16 @@ export function useFabConfig(): { config: ServerFabConfig; status: ConfigStatus 
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let reconnectDelay = 1000;
 
-    const apply = (next: ServerFabConfig, persist: boolean) => {
-      if (disposed || next.version < versionRef.current) {
+    // The version guard only protects against a stale REST/cache read racing
+    // in behind a fresher one. A live WebSocket frame is the server speaking
+    // right now — always authoritative, even if its version numbering moved
+    // backwards (e.g. the server's store was reset).
+    const apply = (
+      next: ServerFabConfig,
+      persist: boolean,
+      authoritative = false,
+    ) => {
+      if (disposed || (!authoritative && next.version < versionRef.current)) {
         return;
       }
       versionRef.current = next.version;
@@ -96,7 +104,7 @@ export function useFabConfig(): { config: ServerFabConfig; status: ConfigStatus 
         try {
           const message = JSON.parse(event.data);
           if (message.type === 'config') {
-            apply(message.payload, true);
+            apply(message.payload, true, true);
           }
         } catch {
           // Ignore malformed frames.

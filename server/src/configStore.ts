@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import type { FabAction, FabConfig } from './schema';
 
 const DEFAULT_ACTIONS: FabAction[] = [
@@ -9,8 +11,21 @@ const DEFAULT_ACTIONS: FabAction[] = [
   { key: 'share', icon: '📤', label: 'Share', color: '#f59e0b', enabled: true },
 ];
 
+// File-backed persistence (stand-in for a real database): the version must
+// keep climbing across server restarts, because clients cache the config and
+// reject anything older than what they already have.
+const DATA_FILE = join(__dirname, '..', 'data', 'config.json');
+
+function loadPersisted(): FabConfig | null {
+  try {
+    return JSON.parse(readFileSync(DATA_FILE, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
 class ConfigStore extends EventEmitter {
-  private config: FabConfig = {
+  private config: FabConfig = loadPersisted() ?? {
     version: 1,
     updatedAt: Date.now(),
     actions: DEFAULT_ACTIONS,
@@ -36,6 +51,12 @@ class ConfigStore extends EventEmitter {
       updatedAt: Date.now(),
       actions,
     };
+    try {
+      mkdirSync(dirname(DATA_FILE), { recursive: true });
+      writeFileSync(DATA_FILE, JSON.stringify(this.config, null, 2));
+    } catch (err) {
+      console.error('failed to persist config:', err);
+    }
     this.emit('change', this.config);
     return this.config;
   }
